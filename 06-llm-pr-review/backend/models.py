@@ -21,4 +21,26 @@ class ProductUpdate(BaseModel):
     name: Optional[str] = None
     price: Optional[float] = None
     description: Optional[str] = None
-    stock: Optional[int] = None
+from typing import Optional
+from pydantic import NonNegativeInt
+
+class ProductUpdate(BaseModel):
+    name: Optional[str] = None
+    price: Optional[float] = None
+    description: Optional[str] = None
+    stock: Optional[NonNegativeInt] = None
+
+class CartItemDTO(BaseModel):
+    id: int
+    product_id: int
+    quantity: int
+    product: ProductDTO
+
+    class Config:
+        from_attributes = True
+
+from pydantic import PositiveInt
+
+class CartItemCreate(BaseModel):
+    product_id: PositiveInt
+    quantity: PositiveInt

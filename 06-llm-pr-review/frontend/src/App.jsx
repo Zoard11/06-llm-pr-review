@@ -1,28 +1,51 @@
-
-import { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import axios from 'axios';
 
 const API_URL = 'http://localhost:8000';
+const CART_Z = 2147483647;
 
+function dedupeById(arr = []) {
+  const seen = new Set();
+  return arr.filter(item => {
+    if (!item || seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+}
 
 function App() {
   const [products, setProducts] = useState([]);
   const [selectedProduct, setSelectedProduct] = useState(null);
-  // modalType: 'create' | 'edit' | 'view' | null
   const [modalType, setModalType] = useState(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState('');
+  const [cart, setCart] = useState([]);
+  const [mounted, setMounted] = useState(false);
+  const [cartVisible, setCartVisible] = useState(true);
 
   useEffect(() => {
+    setMounted(true);
     fetchProducts();
+    fetchCart();
+     
   }, []);
 
   const fetchProducts = async () => {
     try {
-      const response = await axios.get(`${API_URL}/products/`);
-      setProducts(response.data);
-    } catch (error) {
-      console.error('Error fetching products:', error);
+      const resp = await axios.get(`${API_URL}/products/`);
+      setProducts(Array.isArray(resp.data) ? resp.data : []);
+    } catch (err) {
+      console.error('Error fetching products:', err);
+    }
+  };
+
+  const fetchCart = async () => {
+    try {
+      const resp = await axios.get(`${API_URL}/cart/`);
+      setCart(dedupeById(Array.isArray(resp.data) ? resp.data : []));
+    } catch (err) {
+      console.error('Error fetching cart:', err);
     }
   };
 
@@ -32,36 +55,33 @@ function App() {
     setIsModalOpen(true);
   };
 
-  const handleEdit = (product) => {
-    setSelectedProduct(product);
+  const handleEdit = (p) => {
+    setSelectedProduct(p);
     setModalType('edit');
     setIsModalOpen(true);
   };
 
-  const handleView = (product) => {
-    setSelectedProduct(product);
+  const handleView = (p) => {
+    setSelectedProduct(p);
     setModalType('view');
     setIsModalOpen(true);
   };
 
-  // perform the actual delete API call
   const performDelete = async (id) => {
     try {
       await axios.delete(`${API_URL}/products/${id}`);
-      fetchProducts();
-    } catch (error) {
-      console.error('Error deleting product:', error);
+      await fetchProducts();
+    } catch (err) {
+      console.error(err);
     }
   };
 
-  // open delete confirmation dialog
-  const showDelete = (product) => {
-    setSelectedProduct(product);
+  const showDelete = (p) => {
+    setSelectedProduct(p);
     setModalType('delete');
     setIsModalOpen(true);
   };
 
-  // called when user confirms delete in dialog
   const confirmDelete = async () => {
     if (!selectedProduct) return;
     await performDelete(selectedProduct.id);
@@ -72,108 +92,326 @@ function App() {
 
   const handleSave = async (e) => {
     e.preventDefault();
-    const { name, price, description, stock } = selectedProduct;
+    if (!selectedProduct) return;
     const data = {
-      name,
-      price: parseFloat(price),
-      description,
-      stock: parseInt(stock),
+      name: selectedProduct.name,
+      price: parseFloat(selectedProduct.price),
+      description: selectedProduct.description,
+      stock: parseInt(selectedProduct.stock, 10) || 0,
     };
-
     try {
       if (modalType === 'create') {
         await axios.post(`${API_URL}/products/`, data);
       } else {
         await axios.put(`${API_URL}/products/${selectedProduct.id}`, data);
       }
-      fetchProducts();
+      await fetchProducts();
       setSelectedProduct(null);
       setModalType(null);
       setIsModalOpen(false);
-    } catch (error) {
-      console.error('Error saving product:', error);
+    } catch (err) {
+      console.error('Error saving product:', err);
     }
   };
 
   const handleCancel = () => {
     setSelectedProduct(null);
-  // removed setIsCreating usage; modalType controls modal mode
+    setModalType(null);
     setIsModalOpen(false);
   };
 
-  // Filter products by search
-  const filteredProducts = products.filter(
-    (p) =>
-      p.name.toLowerCase().includes(search.toLowerCase()) ||
-      (p.description && p.description.toLowerCase().includes(search.toLowerCase()))
+  const addToCart = async (productId) => {
+    try {
+      await axios.post(`${API_URL}/cart/`, { product_id: productId, quantity: 1 });
+      await fetchCart();
+      await fetchProducts();
+    } catch (err) {
+      console.error('Error adding to cart:', err);
+    }
+  };
+
+  /**
+   * removeFromCart:
+   * - optimistic UI removal (cart item removed immediately)
+   * - checks server product stock before deletion and after deletion
+   * - if backend already restored stock when deleting the cart item, do nothing
+   * - otherwise, perform a single PUT to update stock on server
+   * - final fetch for consistency
+   */
+  const removeFromCart = async (itemId) => {
+    try {
+      const item = cart.find(c => c.id === itemId);
+      if (!item) return;
+
+      // Optimistic UI: remove cart item locally right away
+      setCart(prev => prev.filter(i => i.id !== itemId));
+
+      // Optimistically restore product stock in UI (so product cards reflect restored units immediately)
+      setProducts(prev =>
+        prev.map(p =>
+          p.id === item.product.id ? { ...p, stock: Number(p.stock || 0) + Number(item.quantity || 0) } : p
+        )
+      );
+
+      // --- Server-side logic (careful to avoid double-adding) ---
+      // 1) fetch server product BEFORE deletion (to know baseline)
+      let prodBefore = null;
+      try {
+        const rBefore = await axios.get(`${API_URL}/products/${item.product.id}`);
+        prodBefore = rBefore.data;
+      } catch (err) {
+        // if GET fails, set prodBefore = null and continue (we'll attempt deletion & then fetch after)
+        prodBefore = null;
+      }
+
+      // 2) delete cart item on server (some backends might auto-restore stock here)
+      try {
+        await axios.delete(`${API_URL}/cart/${itemId}`);
+      } catch (err) {
+        // deletion failed -> revert optimistic changes and re-fetch
+        console.warn('Failed to delete cart item on server:', err);
+        // revert optimistic UI
+        setCart(prev => dedupeById([...prev, item]));
+        setProducts(prev =>
+          prev.map(p =>
+            p.id === item.product.id ? { ...p, stock: Number(p.stock || 0) - Number(item.quantity || 0) } : p
+          )
+        );
+        await fetchCart();
+        await fetchProducts();
+        return;
+      }
+
+      // 3) fetch product AFTER deletion to check whether backend already restored stock
+      let prodAfter = null;
+      try {
+        const rAfter = await axios.get(`${API_URL}/products/${item.product.id}`);
+        prodAfter = rAfter.data;
+      } catch (err) {
+        prodAfter = null;
+      }
+
+      // 4) Decide whether we need to update server-side product stock:
+      // - If prodBefore exists and prodAfter exists:
+      //     * If prodAfter.stock >= prodBefore.stock + item.quantity => backend restored (or someone else increased stock) -> do nothing
+      //     * If prodAfter.stock === prodBefore.stock => backend didn't restore -> perform one PUT to set stock = prodAfter.stock + item.quantity
+      // - If prodBefore missing but prodAfter exists:
+      //     * If prodAfter.stock increased by >= item.quantity relative to what we expect from optimistic UI, assume restored; otherwise add item.quantity
+      // - If both missing: give up and just refetch for consistency
+      if (prodAfter && prodBefore) {
+        const before = Number(prodBefore.stock || 0);
+        const after = Number(prodAfter.stock || 0);
+        const qty = Number(item.quantity || 0);
+
+        if (after >= before + qty) {
+          // backend already restored (or other change); nothing to do
+        } else if (after === before) {
+          // backend didn't restore; restore exactly once
+          const updated = { ...prodAfter, stock: after + qty };
+          try {
+            await axios.put(`${API_URL}/products/${updated.id}`, updated);
+          } catch (err) {
+            console.warn('Failed to update product stock on server after delete:', err);
+          }
+        } else {
+          // unexpected: after < before or other concurrent change.
+          // To be safe, ensure stock is at least before + qty
+          if (after < before + qty) {
+            const updated = { ...prodAfter, stock: Math.max(after, before + qty) };
+            try {
+              await axios.put(`${API_URL}/products/${updated.id}`, updated);
+            } catch (err) {
+              console.warn('Failed to reconcile product stock on server:', err);
+            }
+          }
+        }
+      } else if (prodAfter && !prodBefore) {
+        // No baseline; we attempted delete then fetched current
+        // If prodAfter.stock seems unchanged, assume we need to add quantity
+        const after = Number(prodAfter.stock || 0);
+        // Compare with optimistic UI value in local products state:
+        const localProd = products.find(p => p.id === item.product.id);
+        const localStock = localProd ? Number(localProd.stock || 0) : null;
+        // If localStock === after + qty, it means we've already incremented locally — server didn't change -> update server
+        if (localStock !== null) {
+          const qty = Number(item.quantity || 0);
+          if (after + qty === localStock) {
+            const updated = { ...prodAfter, stock: after + qty };
+            try {
+              await axios.put(`${API_URL}/products/${updated.id}`, updated);
+            } catch (err) {
+              console.warn('Failed to update product stock (no baseline):', err);
+            }
+          }
+        }
+      } else if (!prodAfter && prodBefore) {
+        // server fetch after delete failed; fallback: try update using prodBefore + qty
+        const qty = Number(item.quantity || 0);
+        const updated = { ...prodBefore, stock: Number(prodBefore.stock || 0) + qty };
+        try {
+          await axios.put(`${API_URL}/products/${updated.id}`, updated);
+        } catch (err) {
+          console.warn('Failed to update product stock (fallback):', err);
+        }
+      } else {
+        // both missing: we can't be sure, simply refetch both lists to let server be the source of truth
+      }
+
+      // Final refresh for deterministic consistency
+      await fetchCart();
+      await fetchProducts();
+    } catch (err) {
+      console.error('Error removing from cart:', err);
+      // try to recover by reloading canonical state
+      await fetchCart();
+      await fetchProducts();
+    }
+  };
+
+  const filteredProducts = products.filter(p =>
+    p.name.toLowerCase().includes(search.toLowerCase()) ||
+    (p.description && p.description.toLowerCase().includes(search.toLowerCase()))
+  );
+
+  // Cart portal (render only after mount)
+  const CartPortal = mounted ? createPortal(
+    cartVisible ? (
+      <div
+        style={{
+          position: 'fixed',
+          bottom: 16,
+          left: 16,
+          zIndex: CART_Z,
+          width: 340,
+          maxHeight: '70vh',
+          overflow: 'auto',
+          background: '#ffffff',
+          color: '#0a0a0a',
+          padding: 18,
+          borderRadius: 12,
+          boxShadow: '0 12px 30px rgba(0,0,0,0.16)',
+          border: '1px solid rgba(0,0,0,0.08)',
+        }}
+        role="region"
+        aria-label="Shopping cart"
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+          <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Shopping Cart</h3>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <div style={{ color: '#717182', fontSize: 13 }}>{cart.length} item{cart.length !== 1 ? 's' : ''}</div>
+            <button
+              onClick={() => setCartVisible(false)}
+              style={{
+                background: 'transparent',
+                border: '1px solid rgba(0,0,0,0.06)',
+                padding: '6px 10px',
+                borderRadius: 8,
+                cursor: 'pointer',
+                color: '#0a0a0a',
+              }}
+              aria-label="Hide cart"
+              title="Hide cart"
+            >
+              Hide
+            </button>
+          </div>
+        </div>
+
+        {cart.length === 0 ? (
+          <p style={{ margin: 0, color: '#717182' }}>Your cart is empty.</p>
+        ) : (
+          <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+            {cart.map(item => (
+              <li key={item.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
+                <div>
+                  <div style={{ fontWeight: 700 }}>{item.product?.name ?? 'Product'}</div>
+                  <div style={{ fontSize: 13, color: '#717182' }}>Qty: {item.quantity}</div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ color: '#717182', fontSize: 13 }}>${item.product?.price ?? '—'}</div>
+                  <button
+                    onClick={() => removeFromCart(item.id)}
+                    style={{
+                      marginTop: 6,
+                      padding: '6px 8px',
+                      border: '1px solid #D4183D',
+                      background: '#fff',
+                      color: '#D4183D',
+                      borderRadius: 6,
+                      cursor: 'pointer',
+                      fontSize: 13,
+                    }}
+                    aria-label={`Remove ${item.product?.name ?? 'item'}`}
+                  >
+                    Remove
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    ) : null,
+    typeof document !== 'undefined' ? document.body : document.getElementById('root')
+  ) : null;
+
+  // small toggle for debugging / convenience
+  const ToggleButton = (
+    <div style={{ position: 'fixed', top: 12, right: 12, zIndex: CART_Z }}>
+      <button
+        onClick={() => setCartVisible(v => !v)}
+        style={{
+          background: '#030213',
+          color: '#fff',
+          border: 'none',
+          padding: '8px 12px',
+          borderRadius: 8,
+          cursor: 'pointer',
+          boxShadow: '0 6px 12px rgba(0,0,0,0.12)',
+          fontSize: 13,
+        }}
+        aria-label="Toggle cart visibility"
+      >
+        {cartVisible ? 'Hide Cart' : 'Show Cart'}
+      </button>
+    </div>
   );
 
   return (
-    <div className="min-h-screen bg-light-gray flex flex-col items-center pt-[21px] pb-6">
-  <div className="w-full max-w-7xl mx-auto">
-    <h1 className="text-[13.2px] font-normal text-black mb-[28px]">Product Management</h1>
-    {/* Search and Add Bar */}
-    <div className="flex flex-row items-center justify-between mb-6 pr-[64.578px]">
+    <div className="min-h-screen bg-light-gray flex flex-col items-center pt-[21px] pb-[200px]">
+      <div className="w-full max-w-7xl mx-auto">
+        <h1 className="text-[13.2px] font-normal text-black mb-[28px]">Product Management</h1>
+
+        <div className="flex flex-row items-center justify-between mb-6 pr-[64.578px]">
           <div className="relative w-[392px]">
             <input
               type="text"
               placeholder="Search products..."
               value={search}
-              onChange={e => setSearch(e.target.value)}
+              onChange={(e) => setSearch(e.target.value)}
               className="w-full pl-9 pr-4 h-[31.5px] rounded-[6.75px] border border-transparent bg-light-gray text-[10.7px] text-black placeholder-black focus:outline-none focus:border-dark-gray"
             />
-            <span className="absolute left-3 top-[8px] text-black">
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M12.25 12.25L9.71832 9.71832" stroke="currentColor" stroke-width="1.16667" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M6.41667 11.0833C8.994 11.0833 11.0833 8.994 11.0833 6.41667C11.0833 3.83934 8.994 1.75 6.41667 1.75C3.83934 1.75 1.75 3.83934 1.75 6.41667C1.75 8.994 3.83934 11.0833 6.41667 11.0833Z" stroke="currentColor" stroke-width="1.16667" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-            </span>
           </div>
-          <button
-            onClick={handleCreate}
-            className="inline-flex items-center bg-dark-gray hover:bg-dark-gray/80 text-white text-[11.3px] font-medium h-[31.5px] px-[13px] rounded-[6.75px] shadow-sm transition"
-          >
-            <svg className="mr-[8.75px]" width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M7 1.75V12.25" stroke="currentColor" stroke-width="1.16667" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M1.75 7H12.25" stroke="currentColor" stroke-width="1.16667" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
+          <button onClick={handleCreate} className="inline-flex items-center bg-dark-gray hover:bg-dark-gray/80 text-white text-[11.3px] font-medium h-[31.5px] px-[13px] rounded-[6.75px] shadow-sm transition">
             Add Product
           </button>
         </div>
 
-        {/* Product Cards Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
           {filteredProducts.length === 0 ? (
             <div className="col-span-full text-muted-foreground text-center py-8">No products found.</div>
           ) : (
-            filteredProducts.map((product) => (
-              <div key={product.id} className="bg-white rounded-[12.75px] border border-[rgba(0,0,0,0.1)] shadow-sm flex flex-col relative overflow-hidden">
+            filteredProducts.map(product => (
+              <div key={product.id} className="bg-white rounded-[12.75px] border border-[rgba(0,0,0,0.06)] shadow-sm flex flex-col relative overflow-hidden">
                 <div className="p-[15px] pb-0 relative">
                   <h4 className="text-[13.2px] text-black leading-[1.06] mb-[15px]">{product.name}</h4>
                   <div className="absolute top-[15px] right-[14px] flex gap-[7px]">
-                    <button
-                      onClick={() => handleView(product)}
-                      className="inline-flex items-center border border-[rgba(0,0,0,0.06)] text-black bg-white h-7 px-[10px] rounded-[6.75px] text-[11.3px] font-medium shadow-sm"
-                      title="View"
-                    >
-                      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1.20284 7.20303C1.15423 7.07206 1.15423 6.92799 1.20284 6.79703C1.67634 5.64894 2.48006 4.6673 3.51213 3.97655C4.54419 3.2858 5.75812 2.91705 7.00001 2.91705C8.2419 2.91705 9.45583 3.2858 10.4879 3.97655C11.52 4.6673 12.3237 5.64894 12.7972 6.79703C12.8458 6.92799 12.8458 7.07206 12.7972 7.20303C12.3237 8.35111 11.52 9.33275 10.4879 10.0235C9.45583 10.7143 8.2419 11.083 7.00001 11.083C5.75812 11.083 4.54419 10.7143 3.51213 10.0235C2.48006 9.33275 1.67634 8.35111 1.20284 7.20303Z" stroke="currentColor" strokeWidth="1.16667" strokeLinecap="round" strokeLinejoin="round"/><path d="M7 8.75C7.9665 8.75 8.75 7.9665 8.75 7C8.75 6.0335 7.9665 5.25 7 5.25C6.0335 5.25 5.25 6.0335 5.25 7C5.25 7.9665 6.0335 8.75 7 8.75Z" stroke="currentColor" strokeWidth="1.16667" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                    </button>
-                    <button
-                      onClick={() => handleEdit(product)}
-                      className="inline-flex items-center border border-[rgba(0,0,0,0.06)] text-black bg-white h-7 px-[10px] rounded-[6.75px] text-[11.3px] font-medium shadow-sm"
-                      title="Edit"
-                    >
-                      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M7 1.75H2.91667C2.60725 1.75 2.3105 1.87292 2.09171 2.09171C1.87292 2.3105 1.75 2.60725 1.75 2.91667V11.0833C1.75 11.3928 1.87292 11.6895 2.09171 11.9083C2.3105 12.1271 2.60725 12.25 2.91667 12.25H11.0833C11.3928 12.25 11.6895 12.1271 11.9083 11.9083C12.1271 11.6895 12.25 11.3928 12.25 11.0833V7" stroke="currentColor" strokeWidth="1.16667" strokeLinecap="round" strokeLinejoin="round"/><path d="M10.7187 1.53126C10.9508 1.2992 11.2655 1.16882 11.5937 1.16882C11.9219 1.16882 12.2367 1.2992 12.4687 1.53126C12.7008 1.76332 12.8312 2.07807 12.8312 2.40626C12.8312 2.73445 12.7008 3.0492 12.4687 3.28126L7.21114 8.53943C7.07263 8.67782 6.90151 8.77913 6.71356 8.83401L5.03764 9.32401C4.98744 9.33865 4.93424 9.33953 4.88359 9.32655C4.83294 9.31357 4.78671 9.28722 4.74973 9.25025C4.71276 9.21328 4.68641 9.16705 4.67343 9.1164C4.66046 9.06575 4.66133 9.01254 4.67597 8.96234L5.16597 7.28643C5.22111 7.09862 5.32262 6.92771 5.46114 6.78943L10.7187 1.53126Z" stroke="currentColor" strokeWidth="1.16667" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                    </button>
-                    <button
-                      onClick={() => showDelete(product)}
-                      className="inline-flex items-center bg-red text-white h-7 px-[8.75px] rounded-[6.75px] text-[11.3px] font-medium shadow-sm"
-                      title="Delete"
-                    >
-                      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5.83334 6.41669V9.91669" stroke="currentColor" strokeWidth="1.16667" strokeLinecap="round" strokeLinejoin="round"/><path d="M8.16666 6.41669V9.91669" stroke="currentColor" strokeWidth="1.16667" strokeLinecap="round" strokeLinejoin="round"/><path d="M11.0833 3.5V11.6667C11.0833 11.9761 10.9604 12.2728 10.7416 12.4916C10.5228 12.7104 10.2261 12.8333 9.91666 12.8333H4.08332C3.7739 12.8333 3.47716 12.7104 3.25837 12.4916C3.03957 12.2728 2.91666 11.9761 2.91666 11.6667V3.5" stroke="currentColor" strokeWidth="1.16667" strokeLinecap="round" strokeLinejoin="round"/><path d="M1.75 3.5H12.25" stroke="currentColor" strokeWidth="1.16667" strokeLinecap="round" strokeLinejoin="round"/><path d="M4.66666 3.50002V2.33335C4.66666 2.02393 4.78957 1.72719 5.00837 1.5084C5.22716 1.2896 5.5239 1.16669 5.83332 1.16669H8.16666C8.47608 1.16669 8.77282 1.2896 8.99161 1.5084C9.21041 1.72719 9.33332 2.02393 9.33332 2.33335V3.50002" stroke="currentColor" strokeWidth="1.16667" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                    </button>
+                    <button onClick={() => handleView(product)} className="inline-flex items-center border border-[rgba(0,0,0,0.06)] text-black bg-white h-7 px-[10px] rounded-[6.75px] text-[11.3px] font-medium shadow-sm">View</button>
+                    <button onClick={() => handleEdit(product)} className="inline-flex items-center border border-[rgba(0,0,0,0.06)] text-black bg-white h-7 px-[10px] rounded-[6.75px] text-[11.3px] font-medium shadow-sm">Edit</button>
+                    <button onClick={() => showDelete(product)} className="inline-flex items-center bg-red text-white h-7 px-[8.75px] rounded-[6.75px] text-[11.3px] font-medium shadow-sm">Delete</button>
                   </div>
                 </div>
+
                 <div className="px-[14px] pb-[14px]">
                   <div className="text-[11.3px] text-muted-foreground leading-[1.55] mb-[14px] min-h-[54px]">{product.description}</div>
                   <div className="flex items-center justify-between">
@@ -181,53 +419,37 @@ function App() {
                     <span className="text-[12.8px] font-medium text-dark-gray">${product.price}</span>
                   </div>
                 </div>
+
+                <button onClick={() => addToCart(product.id)} className="mt-4 p-2 bg-green-600 hover:bg-green-700 rounded-lg font-semibold text-white mx-4 mb-4">Add to Cart</button>
               </div>
             ))
           )}
         </div>
       </div>
 
-      {/* Modal */}
+      {/* modal with high contrast and clear text */}
       {isModalOpen && (
-        <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50" onClick={handleCancel}>
-          <div className="bg-white rounded-[8.75px] shadow-[0_10px_15px_-3px_rgba(0,0,0,0.1),0_4px_6px_-2px_rgba(0,0,0,0.1)] w-full max-w-[388px] relative" onClick={e => e.stopPropagation()}>
-            <button
-              className="absolute top-[15px] right-[15px] w-6 h-6 flex items-center justify-center"
-              onClick={handleCancel}
-            >
-              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M1 1L11 11M1 11L11 1" />
-              </svg>
+        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-60" onClick={handleCancel}>
+          <div className="bg-white rounded-[8.75px] shadow-[0_20px_30px_rgba(0,0,0,0.25)] w-full max-w-[480px] relative" onClick={e => e.stopPropagation()}>
+            <button className="absolute top-[12px] right-[12px] w-8 h-8 flex items-center justify-center bg-[rgba(0,0,0,0.04)] rounded" onClick={handleCancel} aria-label="Close modal">
+              ✕
             </button>
-              <div className="p-[22px]">
+            <div className="p-[22px] text-black">
               {modalType === 'delete' ? (
                 <div>
-                  <h2 className="text-base font-semibold text-black mb-[12px]">Delete Product</h2>
-                  <p className="text-[12px] text-muted-foreground mb-[18px]">Are you sure you want to delete "{selectedProduct?.name}"? This action cannot be undone.</p>
+                  <h2 className="text-[18px] font-semibold mb-3">Delete Product</h2>
+                  <p className="text-[13px] text-muted-foreground mb-4">Are you sure you want to delete <strong className="text-black">"{selectedProduct?.name}"</strong>? This action cannot be undone.</p>
                   <div className="flex justify-end gap-2">
-                    <button
-                      type="button"
-                      onClick={handleCancel}
-                      className="h-8 px-[14px] border border-[rgba(0,0,0,0.1)] rounded-[6.75px] text-xs font-medium text-black"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      onClick={confirmDelete}
-                      className="h-8 px-[11px] bg-red text-white rounded-[6.75px] text-xs font-medium"
-                    >
-                      Delete Product
-                    </button>
+                    <button onClick={handleCancel} className="h-8 px-[14px] border border-[rgba(0,0,0,0.08)] rounded-[6.75px] text-xs font-medium text-black">Cancel</button>
+                    <button onClick={confirmDelete} className="h-8 px-[11px] bg-red text-white rounded-[6.75px] text-xs font-medium">Delete Product</button>
                   </div>
                 </div>
               ) : modalType === 'view' ? (
                 <div>
-                  <h2 className="text-[16px] font-semibold text-black mb-[12px]">Product Details</h2>
-                  <h3 className="text-[16px] font-medium text-black mb-[12px]">{selectedProduct?.name}</h3>
-                  <p className="text-[16px] text-muted-foreground mb-[16px] leading-[1.5]">{selectedProduct?.description}</p>
-                  <div className="h-[1px] bg-[rgba(0,0,0,0.1)] mb-[16px]"></div>
-                  <div className="space-y-[10px] text-[12px] text-muted-foreground">
+                  <h2 className="text-[16px] font-semibold text-black mb-[12px]">{selectedProduct?.name}</h2>
+                  <p className="text-[14px] text-muted-foreground mb-[16px] leading-[1.5]">{selectedProduct?.description}</p>
+                  <div className="h-[1px] bg-[rgba(0,0,0,0.06)] mb-[16px]"></div>
+                  <div className="space-y-[10px] text-[13px] text-muted-foreground">
                     <div className="flex items-center justify-between">
                       <span>Product ID:</span>
                       <span className="text-black">{selectedProduct?.id ?? '-'}</span>
@@ -238,141 +460,68 @@ function App() {
                     </div>
                     <div className="flex items-center justify-between">
                       <span>Price:</span>
-                      <span className="text-[12px] font-medium text-dark-gray">$ {selectedProduct?.price ?? '-'}</span>
+                      <span className="text-[13px] font-medium text-dark-gray">$ {selectedProduct?.price ?? '-'}</span>
                     </div>
                   </div>
                   <div className="flex justify-end mt-[18px]">
-                    <button
-                      type="button"
-                      onClick={handleCancel}
-                      className="h-8 px-[14px] border border-[rgba(0,0,0,0.1)] rounded-[6.75px] text-xs font-medium text-black"
-                    >
-                      Close
-                    </button>
+                    <button onClick={handleCancel} className="h-8 px-[14px] border border-[rgba(0,0,0,0.08)] rounded-[6.75px] text-xs font-medium text-black">Close</button>
                   </div>
                 </div>
               ) : modalType === 'edit' ? (
-                <form onSubmit={handleSave} className="space-y-[18px]">
+                <form onSubmit={handleSave} className="space-y-[16px]">
                   <div>
-                    <label className="block text-[12px] font-medium text-black mb-[6px]">Product Name</label>
-                    <input
-                      type="text"
-                      placeholder="Enter product name"
-                      value={selectedProduct?.name || ''}
-                      onChange={e => setSelectedProduct({ ...selectedProduct, name: e.target.value })}
-                      required
-                      className="w-full h-8 px-[11px] py-2 bg-light-gray rounded-[6.75px] border border-transparent text-xs focus:outline-none focus:border-black"
-                    />
+                    <label className="block text-[13px] font-medium text-black mb-[6px]">Product Name</label>
+                    <input type="text" placeholder="Enter product name" value={selectedProduct?.name || ''} onChange={e => setSelectedProduct({ ...selectedProduct, name: e.target.value })} required className="w-full h-9 px-[11px] py-2 bg-light-gray rounded-[6.75px] border border-transparent text-sm focus:outline-none focus:border-black" />
                   </div>
+
                   <div>
-                    <label className="block text-[12px] font-medium text-black mb-[6px]">Description</label>
-                    <textarea
-                      placeholder="Enter product description"
-                      value={selectedProduct?.description || ''}
-                      onChange={e => setSelectedProduct({ ...selectedProduct, description: e.target.value })}
-                      className="w-full min-h-[69px] px-[11px] py-2 bg-light-gray rounded-[6.75px] border border-transparent text-sm focus:outline-none focus:border-black"
-                    />
+                    <label className="block text-[13px] font-medium text-black mb-[6px]">Description</label>
+                    <textarea placeholder="Enter product description" value={selectedProduct?.description || ''} onChange={e => setSelectedProduct({ ...selectedProduct, description: e.target.value })} className="w-full min-h-[80px] px-[11px] py-2 bg-light-gray rounded-[6.75px] border border-transparent text-sm focus:outline-none focus:border-black" />
                   </div>
-                  <div className="flex gap-[16px]">
-                    <div>
-                      <label className="block text-[12px] font-medium text-black mb-[6px]">Price ($)</label>
-                      <input
-                        type="number"
-                        placeholder="199.99"
-                        value={selectedProduct?.price || ''}
-                        onChange={e => setSelectedProduct({ ...selectedProduct, price: e.target.value })}
-                        required
-                        className="w-[165px] h-8 px-[11px] py-2 bg-light-gray rounded-[6.75px] border border-transparent text-xs focus:outline-none focus:border-black"
-                      />
+
+                  <div className="flex gap-[12px]">
+                    <div className="flex-1">
+                      <label className="block text-[13px] font-medium text-black mb-[6px]">Price ($)</label>
+                      <input type="number" placeholder="0.00" value={selectedProduct?.price || ''} onChange={e => setSelectedProduct({ ...selectedProduct, price: e.target.value })} required className="w-full h-9 px-[11px] py-2 bg-light-gray rounded-[6.75px] border border-transparent text-sm focus:outline-none focus:border-black" />
                     </div>
-                    <div>
-                      <label className="block text-[12px] font-medium text-black mb-[6px]">Stock</label>
-                      <input
-                        type="number"
-                        placeholder="25"
-                        value={selectedProduct?.stock || ''}
-                        onChange={e => setSelectedProduct({ ...selectedProduct, stock: e.target.value })}
-                        required
-                        className="w-[165px] h-8 px-[11px] py-2 bg-light-gray rounded-[6.75px] border border-transparent text-xs focus:outline-none focus:border-black"
-                      />
+                    <div style={{ width: 140 }}>
+                      <label className="block text-[13px] font-medium text-black mb-[6px]">Stock</label>
+                      <input type="number" placeholder="0" value={selectedProduct?.stock || ''} onChange={e => setSelectedProduct({ ...selectedProduct, stock: e.target.value })} required className="w-full h-9 px-[11px] py-2 bg-light-gray rounded-[6.75px] border border-transparent text-sm focus:outline-none focus:border-black" />
                     </div>
                   </div>
-                  <div className="flex justify-end gap-2 pt-[12px]">
-                    <button
-                      type="button"
-                      onClick={handleCancel}
-                      className="h-8 w-[68px] px-[14px] border border-[rgba(0,0,0,0.1)] rounded-[6.75px] text-xs font-medium text-black"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="submit"
-                      className="h-8 w-[113px] bg-dark-gray hover:bg-dark-gray/80 text-white rounded-[6.75px] text-xs font-medium"
-                    >
-                      Update Product
-                    </button>
+
+                  <div className="flex justify-end gap-2 pt-[6px]">
+                    <button type="button" onClick={handleCancel} className="h-9 px-[14px] border border-[rgba(0,0,0,0.08)] rounded-[6.75px] text-sm font-medium text-black">Cancel</button>
+                    <button type="submit" className="h-9 px-[12px] bg-dark-gray hover:bg-dark-gray/90 text-white rounded-[6.75px] text-sm font-medium">{modalType === 'edit' ? 'Update' : 'Save'}</button>
                   </div>
                 </form>
               ) : (
-                <form onSubmit={handleSave} className="space-y-[18px]">
+                // create form (same layout as edit)
+                <form onSubmit={handleSave} className="space-y-[16px]">
                   <div>
-                    <label className="block text-[12px] font-medium text-black mb-[6px]">Product Name</label>
-                    <input
-                      type="text"
-                      placeholder="Enter product name"
-                      value={selectedProduct?.name || ''}
-                      onChange={e => setSelectedProduct({ ...selectedProduct, name: e.target.value })}
-                      required
-                      className="w-full h-8 px-[11px] py-2 bg-light-gray rounded-[6.75px] border border-transparent text-xs focus:outline-none focus:border-black"
-                    />
+                    <label className="block text-[13px] font-medium text-black mb-[6px]">Product Name</label>
+                    <input type="text" placeholder="Enter product name" value={selectedProduct?.name || ''} onChange={e => setSelectedProduct({ ...selectedProduct, name: e.target.value })} required className="w-full h-9 px-[11px] py-2 bg-light-gray rounded-[6.75px] border border-transparent text-sm focus:outline-none focus:border-black" />
                   </div>
+
                   <div>
-                    <label className="block text-[12px] font-medium text-black mb-[6px]">Description</label>
-                    <textarea
-                      placeholder="Enter product description"
-                      value={selectedProduct?.description || ''}
-                      onChange={e => setSelectedProduct({ ...selectedProduct, description: e.target.value })}
-                      className="w-full min-h-[56px] px-[11px] py-2 bg-light-gray rounded-[6.75px] border border-transparent text-sm focus:outline-none focus:border-black"
-                    />
+                    <label className="block text-[13px] font-medium text-black mb-[6px]">Description</label>
+                    <textarea placeholder="Enter product description" value={selectedProduct?.description || ''} onChange={e => setSelectedProduct({ ...selectedProduct, description: e.target.value })} className="w-full min-h-[80px] px-[11px] py-2 bg-light-gray rounded-[6.75px] border border-transparent text-sm focus:outline-none focus:border-black" />
                   </div>
-                  <div className="flex gap-[16px]">
-                    <div>
-                      <label className="block text-[12px] font-medium text-black mb-[6px]">Price ($)</label>
-                      <input
-                        type="number"
-                        placeholder="0.00"
-                        value={selectedProduct?.price || ''}
-                        onChange={e => setSelectedProduct({ ...selectedProduct, price: e.target.value })}
-                        required
-                        className="w-[165px] h-8 px-[11px] py-2 bg-light-gray rounded-[6.75px] border border-transparent text-xs focus:outline-none focus:border-black"
-                      />
+
+                  <div className="flex gap-[12px]">
+                    <div className="flex-1">
+                      <label className="block text-[13px] font-medium text-black mb-[6px]">Price ($)</label>
+                      <input type="number" placeholder="0.00" value={selectedProduct?.price || ''} onChange={e => setSelectedProduct({ ...selectedProduct, price: e.target.value })} required className="w-full h-9 px-[11px] py-2 bg-light-gray rounded-[6.75px] border border-transparent text-sm focus:outline-none focus:border-black" />
                     </div>
-                    <div>
-                      <label className="block text-[12px] font-medium text-black mb-[6px]">Stock</label>
-                      <input
-                        type="number"
-                        placeholder="0"
-                        value={selectedProduct?.stock || ''}
-                        onChange={e => setSelectedProduct({ ...selectedProduct, stock: e.target.value })}
-                        required
-                        className="w-[165px] h-8 px-[11px] py-2 bg-light-gray rounded-[6.75px] border border-transparent text-xs focus:outline-none focus:border-black"
-                      />
+                    <div style={{ width: 140 }}>
+                      <label className="block text-[13px] font-medium text-black mb-[6px]">Stock</label>
+                      <input type="number" placeholder="0" value={selectedProduct?.stock || ''} onChange={e => setSelectedProduct({ ...selectedProduct, stock: e.target.value })} required className="w-full h-9 px-[11px] py-2 bg-light-gray rounded-[6.75px] border border-transparent text-sm focus:outline-none focus:border-black" />
                     </div>
                   </div>
-                  <div className="flex justify-end gap-2 pt-[12px]">
-                    <button
-                      type="button"
-                      onClick={handleCancel}
-                      className="h-8 w-[68px] px-[14px] border border-[rgba(0,0,0,0.1)] rounded-[6.75px] text-xs font-medium text-black"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="submit"
-                      className="h-8 w-[113px] bg-dark-gray hover:bg-dark-gray/80 text-white rounded-[6.75px] text-xs font-medium"
-                    >
-                      Add Product
-                    </button>
+
+                  <div className="flex justify-end gap-2 pt-[6px]">
+                    <button type="button" onClick={handleCancel} className="h-9 px-[14px] border border-[rgba(0,0,0,0.08)] rounded-[6.75px] text-sm font-medium text-black">Cancel</button>
+                    <button type="submit" className="h-9 px-[12px] bg-dark-gray hover:bg-dark-gray/90 text-white rounded-[6.75px] text-sm font-medium">Add Product</button>
                   </div>
                 </form>
               )}
@@ -380,6 +529,9 @@ function App() {
           </div>
         </div>
       )}
+
+      {ToggleButton}
+      {CartPortal}
     </div>
   );
 }
