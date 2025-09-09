@@ -22,3 +22,16 @@ class ProductUpdate(BaseModel):
     price: Optional[float] = None
     description: Optional[str] = None
     stock: Optional[int] = None
+
+class CartItemDTO(BaseModel):
+    id: int
+    product_id: int
+    quantity: int
+    product: ProductDTO
+
+    class Config:
+        from_attributes = True
+
+class CartItemCreate(BaseModel):
+    product_id: int
+    quantity: int
