@@ -22,8 +22,12 @@ class Product(Base):
     price = Column(Float, nullable=False)
     description = Column(String, nullable=True)
     stock = Column(Integer, nullable=False)
-    cart_items = relationship("CartItem", back_populates="product")
-
+    cart_items = relationship(
+        "CartItem",
+        back_populates="product",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 class CartItem(Base):
     __tablename__ = "cart_items"

@@ -103,9 +103,10 @@ async def add_to_cart(
     product = product_result.scalar_one_or_none()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
+    if payload.quantity <= 0:
+        raise HTTPException(status_code=422, detail="Quantity must be >= 1")
     if product.stock < payload.quantity:
         raise HTTPException(status_code=400, detail="Not enough stock")
-
     # Check if item is already in cart
     cart_item_result = await db.execute(
         select(CartItem)
@@ -143,19 +144,16 @@ async def add_to_cart(
 async def remove_from_cart(item_id: int, db: AsyncSession = Depends(get_db)):
     # Get cart item
     cart_item_result = await db.execute(
-        select(CartItem).filter(CartItem.id == item_id)
+        select(CartItem)
+        .filter(CartItem.id == item_id)
+        .options(selectinload(CartItem.product))
     )
     cart_item = cart_item_result.scalar_one_or_none()
     if not cart_item:
         raise HTTPException(status_code=404, detail="Cart item not found")
 
-    # Get product
-    product_result = await db.execute(
-        select(Product).filter(Product.id == cart_item.product_id)
-    )
-    product = product_result.scalar_one_or_none()
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
+    # Get product (already eagerly loaded)
+    product = cart_item.product
 
     # Update product stock
     product.stock += cart_item.quantity
@@ -164,7 +162,6 @@ async def remove_from_cart(item_id: int, db: AsyncSession = Depends(get_db)):
     await db.commit()
 
     return cart_item
-
 
 if __name__ == "__main__":
     import uvicorn
