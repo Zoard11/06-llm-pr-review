@@ -1,0 +1,25 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-white: #FFFFFF;
+  --color-black: #0A0A0A;
+  --color-red: #D4183D;
+  --color-muted-foreground: #717182;
+  --color-dark-gray: #030213;
+  --color-light-gray: #F3F3F5;
+}
+
+body {
+  font-family: 'Inter', sans-serif;
+}
+
+/* small helper utilities to match Figma tokens used in JSX */
+.bg-light-gray { background-color: var(--color-light-gray); }
+.text-muted-foreground { color: var(--color-muted-foreground); }
+.bg-dark-gray { background-color: var(--color-dark-gray); }
+.text-black { color: var(--color-black); }
+.bg-red { background-color: var(--color-red); }
+.text-white { color: var(--color-white); }
+.border-red { border-color: var(--color-red); }
