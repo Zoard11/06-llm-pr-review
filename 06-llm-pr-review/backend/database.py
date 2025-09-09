@@ -1,4 +1,3 @@
-
 from sqlalchemy import Column, Integer, String, Float
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.ext.declarative import declarative_base
@@ -24,10 +23,23 @@ class Product(Base):
     stock = Column(Integer, nullable=False)
 
 async def get_db():
+    """
+    Asynchronous dependency that provides a scoped AsyncSession for database operations.
+    
+    Yields:
+        AsyncSession: An async SQLAlchemy session instance tied to AsyncSessionLocal. The session is opened when the generator is entered and closed automatically when the context exits.
+    """
     async with AsyncSessionLocal() as session:
         yield session
 
 
 async def create_tables():
+    """
+    Create all database tables defined on the declarative Base.
+    
+    This asynchronous function opens an async engine connection and runs Base.metadata.create_all
+    to ensure all ORM tables are created in the bound database. Calling it is safe to run
+    multiple times: existing tables are not recreated.
+    """
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

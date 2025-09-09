@@ -1,10 +1,33 @@
-
 import { useState, useEffect } from 'react';
 import axios from 'axios';
 
 const API_URL = 'http://localhost:8000';
 
 
+/**
+ * Product management React component — lists, searches, creates, views, edits, and deletes products.
+ *
+ * This component maintains local state for the product list, the currently selected product,
+ * modal mode (one of `'create' | 'edit' | 'view' | 'delete'`), modal visibility, and the search term.
+ * On mount it fetches products from the API (GET `${API_URL}/products/`) and updates the list.
+ * Creating, updating and deleting products are performed via POST, PUT and DELETE requests to the API
+ * and the list is refreshed after successful operations.
+ *
+ * Modal interactions:
+ * - 'create': opens a form to add a new product.
+ * - 'edit': opens a form pre-filled for updating an existing product.
+ * - 'view': shows read-only product details.
+ * - 'delete': shows a confirmation dialog that triggers deletion on confirm.
+ *
+ * Filter behavior:
+ * - Products are filtered client-side by the `search` term (case-insensitive) against name and description.
+ *
+ * Notes:
+ * - Price and stock inputs are parsed to numbers before being sent to the API.
+ * - API errors are logged to the console.
+ *
+ * @returns {JSX.Element} The product management UI.
+ */
 function App() {
   const [products, setProducts] = useState([]);
   const [selectedProduct, setSelectedProduct] = useState(null);
