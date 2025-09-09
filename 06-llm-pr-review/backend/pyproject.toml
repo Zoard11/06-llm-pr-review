@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fastapi-template"
+version = "0.1.0"
+description = "Extensible FastAPI template with database connection"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi==0.116.0",
+    "uvicorn[standard]==0.35.0",
+    "sqlalchemy[asyncio]==2.0.41",
+    "aiosqlite==0.21.0",
+    "pydantic==2.11.7",
+    "pydantic-settings==2.10.1",
+    "python-dotenv==1.1.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "httpx",
+    "black",
+    "isort",
+    "flake8",
+]
+
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.0",
+    "httpx>=0.24.0",
+    "black>=23.0",
+    "isort>=5.0",
+    "flake8>=6.0",
+]
